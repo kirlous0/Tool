@@ -1,10 +1,14 @@
 import React, { useState } from 'react';
 import {
+  AppMode,
   AppStep,
   CandidateRoot,
+  DiffReport,
   ExtractedFileItem,
+  GitHubRepository,
   GitHubUser,
   RepoConfig,
+  UpdateConfig,
   UploadProgress,
   VerificationResult,
 } from './types';
@@ -13,12 +17,20 @@ import { ZipUploadStep } from './components/ZipUploadStep';
 import { RootDetectionStep } from './components/RootDetectionStep';
 import { FileReviewStep } from './components/FileReviewStep';
 import { GitHubConfigStep } from './components/GitHubConfigStep';
+import { RepoSelectionStep } from './components/RepoSelectionStep';
+import { DiffReviewStep } from './components/DiffReviewStep';
 import { UploadProgressStep } from './components/UploadProgressStep';
 import { FinalResultStep } from './components/FinalResultStep';
 import { analyzeZipFile, extractFilesFromRoot, ZipAnalysisResult } from './utils/zipAnalyzer';
-import { createGitHubRepository, uploadProjectToGitHub, verifyGitHubRepositoryTree } from './utils/githubApi';
+import {
+  createGitHubRepository,
+  uploadProjectToGitHub,
+  updateGitHubRepository,
+  verifyGitHubRepositoryTree,
+} from './utils/githubApi';
 
 export default function App() {
+  const [appMode, setAppMode] = useState<AppMode>('create');
   const [step, setStep] = useState<AppStep>('upload');
 
   // ZIP Analysis State
@@ -34,10 +46,14 @@ export default function App() {
   // Extracted Files State
   const [extractedFiles, setExtractedFiles] = useState<ExtractedFileItem[]>([]);
 
-  // GitHub Setup State
+  // GitHub Setup State (Create Mode)
   const [token, setToken] = useState<string>('');
   const [user, setUser] = useState<GitHubUser | null>(null);
   const [repoConfig, setRepoConfig] = useState<RepoConfig | null>(null);
+
+  // GitHub Setup State (Update Mode)
+  const [updateConfig, setUpdateConfig] = useState<UpdateConfig | null>(null);
+  const [commitSha, setCommitSha] = useState<string>('');
 
   // Upload & Verification State
   const [uploadProgress, setUploadProgress] = useState<UploadProgress | null>(null);
@@ -96,19 +112,92 @@ export default function App() {
     );
   };
 
-  // Step 3: Confirm Files & Go to GitHub Config
+  // Step 3: Confirm Files & Go to next step based on Mode
   const handleConfirmFileReview = () => {
-    setStep('github-config');
+    if (appMode === 'create') {
+      setStep('github-config');
+    } else {
+      setStep('repo-selection');
+    }
   };
 
-  // Step 4: Start Upload Process
+  // Update Mode Step: Diff generated from Repo Selection
+  const handleDiffGenerated = (
+    selectedRepo: GitHubRepository,
+    selectedBranch: string,
+    diffReport: DiffReport
+  ) => {
+    setUpdateConfig({
+      selectedRepo,
+      selectedBranch,
+      strategy: 'modified-only',
+      commitMessage: `Update project - ${new Date().toISOString().split('T')[0]}`,
+      deletedFilesToDelete: new Set(),
+      diffReport,
+    });
+    setStep('diff-review');
+  };
+
+  // Execute Update Repository Flow (Update Mode)
+  const handleStartUpdateProcess = async (config: UpdateConfig) => {
+    if (!token) return;
+
+    setUpdateConfig(config);
+    setCreatedRepoUrl(config.selectedRepo.htmlUrl);
+    setStep('uploading');
+
+    try {
+      const updateRes = await updateGitHubRepository(
+        token,
+        config.selectedRepo.owner.login,
+        config.selectedRepo.name,
+        config.selectedBranch,
+        config,
+        (progress) => setUploadProgress({ ...progress })
+      );
+
+      setCommitSha(updateRes.commitSha);
+
+      // Verify final tree
+      const expectedPaths = [
+        ...config.diffReport.unchangedFiles.map((f) => f.path),
+        ...config.diffReport.newFiles.map((f) => f.path),
+        ...config.diffReport.modifiedFiles.map((f) => f.path),
+        ...config.diffReport.renamedFiles.map((f) => f.path),
+      ];
+
+      const verifyRes = await verifyGitHubRepositoryTree(
+        token,
+        config.selectedRepo.owner.login,
+        config.selectedRepo.name,
+        expectedPaths
+      );
+
+      setVerificationResult(verifyRes);
+      setStep('completed');
+    } catch (err: any) {
+      console.error('Update process failed:', err);
+      setUploadProgress((prev) => ({
+        totalFiles: config.diffReport.newFiles.length + config.diffReport.modifiedFiles.length,
+        processedFiles: prev?.processedFiles || 0,
+        currentFile: 'Update failed',
+        successfulCount: prev?.successfulCount || 0,
+        failedCount: prev?.failedCount || 1,
+        skippedCount: config.diffReport.unchangedFiles.length,
+        fileResults: prev?.fileResults || [],
+        status: 'failed',
+        errorMessage: err.message || 'An error occurred during repository update.',
+      }));
+    }
+  };
+
+  // Create Mode Flow: Start Upload Process (Create Mode)
   const handleStartUpload = async (config: RepoConfig) => {
     if (!user || !token) return;
 
     setRepoConfig(config);
     setStep('uploading');
 
-    // Filter files to upload
     const activeFiles = extractedFiles.filter(
       (f) => !f.isExcluded && f.status !== 'error'
     );
@@ -173,8 +262,11 @@ export default function App() {
 
   // Retry Failed Files
   const handleRetryFailed = async () => {
-    if (!user || !token || !repoConfig) return;
-    handleStartUpload(repoConfig);
+    if (appMode === 'create' && repoConfig) {
+      handleStartUpload(repoConfig);
+    } else if (appMode === 'update' && updateConfig) {
+      handleStartUpdateProcess(updateConfig);
+    }
   };
 
   // Full Reset to Upload State
@@ -188,9 +280,11 @@ export default function App() {
     setPreserveFolder(false);
     setExtractedFiles([]);
     setRepoConfig(null);
+    setUpdateConfig(null);
     setUploadProgress(null);
     setVerificationResult(null);
     setCreatedRepoUrl('');
+    setCommitSha('');
   };
 
   // Compute default initial repo name
@@ -205,12 +299,14 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 font-sans flex flex-col selection:bg-cyan-500 selection:text-slate-950">
+    <div className="min-h-screen bg-slate-950 text-slate-100 font-sans flex flex-col selection:bg-sky-500 selection:text-slate-950">
       <Header currentStep={step} onReset={handleReset} />
 
       <main className="flex-1 pb-16">
         {step === 'upload' && (
           <ZipUploadStep
+            appMode={appMode}
+            onModeChange={setAppMode}
             onFileSelected={handleFileSelected}
             isExtracting={isExtracting}
             extractionError={extractionError}
@@ -255,6 +351,30 @@ export default function App() {
           />
         )}
 
+        {step === 'repo-selection' && (
+          <RepoSelectionStep
+            token={token}
+            user={user}
+            extractedFiles={extractedFiles}
+            onTokenValidated={(newToken, newUser) => {
+              setToken(newToken);
+              setUser(newUser);
+            }}
+            onDiffGenerated={handleDiffGenerated}
+            onBack={() => setStep('file-review')}
+          />
+        )}
+
+        {step === 'diff-review' && updateConfig && (
+          <DiffReviewStep
+            selectedRepo={updateConfig.selectedRepo}
+            selectedBranch={updateConfig.selectedBranch}
+            diffReport={updateConfig.diffReport}
+            onConfirmUpdate={handleStartUpdateProcess}
+            onBack={() => setStep('repo-selection')}
+          />
+        )}
+
         {step === 'uploading' && uploadProgress && (
           <UploadProgressStep
             progress={uploadProgress}
@@ -263,15 +383,24 @@ export default function App() {
           />
         )}
 
-        {step === 'completed' && user && repoConfig && (
+        {step === 'completed' && user && (
           <FinalResultStep
+            appMode={appMode}
             repoUrl={createdRepoUrl}
-            repoConfig={repoConfig}
+            repoConfig={
+              repoConfig || {
+                name: updateConfig?.selectedRepo.name || '',
+                description: updateConfig?.selectedRepo.description || '',
+                isPrivate: updateConfig?.selectedRepo.isPrivate || false,
+              }
+            }
             user={user}
             verification={verificationResult}
             uploadedCount={uploadProgress?.successfulCount || 0}
             skippedCount={extractedFiles.filter((f) => f.isExcluded).length}
             failedCount={uploadProgress?.failedCount || 0}
+            updateConfig={updateConfig}
+            commitSha={commitSha}
             onReset={handleReset}
           />
         )}
@@ -279,3 +408,4 @@ export default function App() {
     </div>
   );
 }
+

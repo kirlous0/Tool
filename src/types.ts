@@ -1,8 +1,13 @@
+export type AppMode = 'create' | 'update';
+
 export type AppStep =
+  | 'mode-selection'
   | 'upload'
   | 'root-detection'
   | 'file-review'
   | 'github-config'
+  | 'repo-selection'
+  | 'diff-review'
   | 'uploading'
   | 'completed';
 
@@ -29,6 +34,7 @@ export interface ExtractedFileItem {
   isRecommendedExclude?: boolean; // node_modules, .next, dist, etc.
   isExcluded: boolean; // whether user chose to skip uploading this file
   isBinary: boolean;
+  gitBlobSha?: string; // Precomputed Git Blob SHA-1
 }
 
 export interface CandidateRoot {
@@ -52,6 +58,63 @@ export interface RepoConfig {
   name: string;
   description: string;
   isPrivate: boolean;
+}
+
+export interface GitHubRepository {
+  id: number;
+  name: string;
+  fullName: string;
+  owner: {
+    login: string;
+    avatarUrl: string;
+  };
+  isPrivate: boolean;
+  defaultBranch: string;
+  updatedAt: string;
+  htmlUrl: string;
+  description: string | null;
+}
+
+export interface GitHubBranch {
+  name: string;
+  commitSha: string;
+}
+
+export type DiffType = 'new' | 'modified' | 'deleted' | 'unchanged' | 'renamed';
+
+export interface FileDiffItem {
+  path: string;
+  type: DiffType;
+  oldPath?: string; // For renamed files
+  localFile?: ExtractedFileItem;
+  remoteSha?: string;
+  localSha?: string;
+  size?: number;
+  confirmDelete?: boolean; // User confirmation for deleted files
+}
+
+export interface DiffReport {
+  newFiles: FileDiffItem[];
+  modifiedFiles: FileDiffItem[];
+  deletedFiles: FileDiffItem[];
+  unchangedFiles: FileDiffItem[];
+  renamedFiles: FileDiffItem[];
+  totalLocalFiles: number;
+  totalRemoteFiles: number;
+  totalFinalFiles: number;
+  baseCommitSha: string;
+  baseTreeSha: string;
+}
+
+export type UpdateStrategy = 'modified-only' | 'sync';
+
+export interface UpdateConfig {
+  selectedRepo: GitHubRepository;
+  selectedBranch: string;
+  strategy: UpdateStrategy;
+  commitMessage: string;
+  deletedFilesToDelete: Set<string>; // set of paths user confirmed to delete
+  diffReport: DiffReport;
 }
 
 export interface UploadFileResult {
@@ -82,3 +145,4 @@ export interface VerificationResult {
   unexpectedFiles: string[];
   message: string;
 }
+

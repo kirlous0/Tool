@@ -1,14 +1,19 @@
 import React, { useRef, useState } from 'react';
-import { Upload, FileArchive, ShieldCheck, AlertCircle, Loader2 } from 'lucide-react';
+import { Upload, FileArchive, ShieldCheck, AlertCircle, Loader2, Plus, RefreshCw, FolderGit2 } from 'lucide-react';
 import { formatBytes } from '../utils/pathUtils';
+import { AppMode } from '../types';
 
 interface ZipUploadStepProps {
+  appMode: AppMode;
+  onModeChange: (mode: AppMode) => void;
   onFileSelected: (file: File) => void;
   isExtracting: boolean;
   extractionError: string | null;
 }
 
 export const ZipUploadStep: React.FC<ZipUploadStepProps> = ({
+  appMode,
+  onModeChange,
   onFileSelected,
   isExtracting,
   extractionError,
@@ -52,15 +57,61 @@ export const ZipUploadStep: React.FC<ZipUploadStepProps> = ({
   };
 
   return (
-    <div className="max-w-3xl mx-auto py-8 px-4">
-      {/* Hero Section */}
-      <div className="text-center mb-8">
-        <h2 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
-          Upload Project ZIP
-        </h2>
-        <p className="mt-2 text-sm text-slate-400 max-w-xl mx-auto">
-          Extract, analyze, detect project root, and upload directly to a new GitHub repository from your browser.
-        </p>
+    <div className="max-w-3xl mx-auto py-8 px-4 space-y-8">
+      {/* Mode Selector Options Section (Requirement 42) */}
+      <div className="space-y-3">
+        <div className="text-center mb-4">
+          <h2 className="text-2xl sm:text-3xl font-extrabold text-white tracking-tight">
+            What would you like to do?
+          </h2>
+          <p className="mt-1 text-xs sm:text-sm text-slate-400">
+            Select whether you want to publish a brand new repository or update an existing project on GitHub.
+          </p>
+        </div>
+
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+          <div
+            onClick={() => onModeChange('create')}
+            className={`p-5 rounded-2xl border-2 transition cursor-pointer flex items-start gap-4 ${
+              appMode === 'create'
+                ? 'bg-sky-500/10 border-sky-500 shadow-xl shadow-sky-950/30'
+                : 'bg-slate-900/60 border-slate-800 hover:bg-slate-800/60 hover:border-slate-700'
+            }`}
+          >
+            <div className={`p-3 rounded-xl ${appMode === 'create' ? 'bg-sky-500 text-slate-950' : 'bg-slate-800 text-slate-400'}`}>
+              <Plus className="w-6 h-6 stroke-[2.5]" />
+            </div>
+            <div>
+              <div className="text-base font-bold text-white flex items-center gap-2">
+                <span>+ New Repository</span>
+              </div>
+              <p className="text-xs text-slate-400 mt-1 leading-relaxed">
+                Extract ZIP, detect project root, configure repository details, and upload files to a new GitHub repository.
+              </p>
+            </div>
+          </div>
+
+          <div
+            onClick={() => onModeChange('update')}
+            className={`p-5 rounded-2xl border-2 transition cursor-pointer flex items-start gap-4 ${
+              appMode === 'update'
+                ? 'bg-sky-500/10 border-sky-500 shadow-xl shadow-sky-950/30'
+                : 'bg-slate-900/60 border-slate-800 hover:bg-slate-800/60 hover:border-slate-700'
+            }`}
+          >
+            <div className={`p-3 rounded-xl ${appMode === 'update' ? 'bg-sky-500 text-slate-950' : 'bg-slate-800 text-slate-400'}`}>
+              <RefreshCw className="w-6 h-6 stroke-[2.5]" />
+            </div>
+            <div>
+              <div className="text-base font-bold text-white flex items-center gap-2">
+                <span>↻ Update Existing Repository</span>
+              </div>
+              <p className="text-xs text-slate-400 mt-1 leading-relaxed">
+                Compare updated ZIP against an existing GitHub repository, review changes, and upload required diffs.
+              </p>
+            </div>
+          </div>
+        </div>
       </div>
 
       {/* Upload Zone */}
@@ -69,9 +120,9 @@ export const ZipUploadStep: React.FC<ZipUploadStepProps> = ({
         onDragLeave={handleDragLeave}
         onDrop={handleDrop}
         onClick={() => !isExtracting && fileInputRef.current?.click()}
-        className={`relative rounded-2xl border-2 border-dashed p-8 sm:p-12 text-center transition cursor-pointer ${
+        className={`relative rounded-2xl border-2 border-dashed p-8 sm:p-10 text-center transition cursor-pointer ${
           isDragOver
-            ? 'border-cyan-500 bg-cyan-950/20 ring-4 ring-cyan-500/10'
+            ? 'border-sky-500 bg-sky-950/20 ring-4 ring-sky-500/10'
             : 'border-slate-700 bg-slate-900/60 hover:border-slate-500 hover:bg-slate-900'
         }`}
       >
@@ -85,20 +136,20 @@ export const ZipUploadStep: React.FC<ZipUploadStepProps> = ({
 
         {isExtracting ? (
           <div className="flex flex-col items-center justify-center py-4">
-            <Loader2 className="w-12 h-12 text-cyan-400 animate-spin mb-4" />
+            <Loader2 className="w-12 h-12 text-sky-400 animate-spin mb-4" />
             <h3 className="text-lg font-semibold text-white">Analyzing & Extracting ZIP...</h3>
             <p className="text-xs text-slate-400 mt-1">
               Scanning file structure and detecting project root...
             </p>
             {selectedFile && (
-              <div className="mt-4 px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-xs font-mono text-cyan-300">
+              <div className="mt-4 px-3 py-1.5 rounded-lg bg-slate-800 border border-slate-700 text-xs font-mono text-sky-300">
                 {selectedFile.name} ({formatBytes(selectedFile.size)})
               </div>
             )}
           </div>
         ) : (
           <div className="flex flex-col items-center justify-center">
-            <div className="w-16 h-16 rounded-2xl bg-slate-800 text-cyan-400 flex items-center justify-center mb-4 border border-slate-700 shadow-inner">
+            <div className="w-16 h-16 rounded-2xl bg-slate-800 text-sky-400 flex items-center justify-center mb-4 border border-slate-700 shadow-inner">
               <Upload className="w-8 h-8" />
             </div>
 
@@ -106,12 +157,12 @@ export const ZipUploadStep: React.FC<ZipUploadStepProps> = ({
               Drag & Drop your project ZIP file here
             </h3>
             <p className="text-xs text-slate-400 mb-6 max-w-md">
-              Supports standard web, React, Node.js, Python, Go, Rust, or any folder archive (.zip).
+              Select your project ZIP archive (v1 or v2). Supports Web, React, Node, Python, Rust, or any codebase.
             </p>
 
             <button
               type="button"
-              className="px-6 py-2.5 rounded-xl bg-cyan-600 hover:bg-cyan-500 active:bg-cyan-700 text-white font-medium text-sm transition shadow-lg shadow-cyan-950/40 flex items-center gap-2"
+              className="px-6 py-2.5 rounded-xl bg-sky-500 hover:bg-sky-400 active:bg-sky-600 text-slate-950 font-bold text-sm transition shadow-lg shadow-sky-950/40 flex items-center gap-2"
             >
               <FileArchive className="w-4 h-4" />
               <span>Select ZIP File</span>
