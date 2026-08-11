@@ -1,0 +1,6 @@
+{
+  "name": "ZipToGitHub",
+  "description": "Upload project ZIP files directly to a new GitHub repository with root detection, security validation, and file structure preservation.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
