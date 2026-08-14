@@ -52,6 +52,11 @@ export interface GitHubUser {
   avatarUrl: string;
   htmlUrl: string;
   publicRepos: number;
+  scopes?: string[];
+  hasRepoScope?: boolean;
+  tokenType?: 'classic' | 'fine-grained' | 'oauth' | 'unknown';
+  rateLimitRemaining?: number;
+  rateLimitReset?: Date;
 }
 
 export interface RepoConfig {

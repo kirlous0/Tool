@@ -16,40 +16,135 @@ import { arrayBufferToBase64 } from './pathUtils';
 const GITHUB_API_BASE = 'https://api.github.com';
 
 /**
- * Validates a GitHub Personal Access Token and retrieves authenticated user details.
+ * Sanitizes and cleans a GitHub token by stripping quotes, whitespace, and prefixes.
+ */
+export function cleanGitHubToken(token: string): string {
+  if (!token) return '';
+  let clean = token.trim();
+  clean = clean.replace(/^["'`]|["'`]$/g, '').trim();
+  clean = clean.replace(/^(bearer|token)\s+/i, '').trim();
+  return clean;
+}
+
+/**
+ * Generates standard headers for GitHub REST API requests.
+ */
+export function getGitHubHeaders(token: string, extraHeaders?: Record<string, string>): Record<string, string> {
+  const clean = cleanGitHubToken(token);
+  return {
+    Authorization: `Bearer ${clean}`,
+    Accept: 'application/vnd.github+json',
+    'X-GitHub-Api-Version': '2022-11-28',
+    'Content-Type': 'application/json',
+    ...extraHeaders,
+  };
+}
+
+/**
+ * Parses and formats GitHub API errors into clear, actionable messages.
+ */
+export async function parseGitHubErrorResponse(res: Response, defaultMessage: string): Promise<string> {
+  let errorData: any = {};
+  try {
+    errorData = await res.json();
+  } catch {
+    // If not JSON
+  }
+
+  const rawMsg = errorData.message || res.statusText || defaultMessage;
+
+  // 401 Unauthorized
+  if (res.status === 401) {
+    return 'Invalid or expired GitHub token. Authentication failed (401 Unauthorized). Please check your token.';
+  }
+
+  // 403 Forbidden
+  if (res.status === 403) {
+    if (rawMsg.toLowerCase().includes('rate limit')) {
+      return 'GitHub API rate limit exceeded. Please wait a moment or use an authenticated Personal Access Token.';
+    }
+    if (rawMsg.toLowerCase().includes('secondary rate limit')) {
+      return 'GitHub secondary rate limit reached due to rapid requests. The app will automatically retry with backoff.';
+    }
+    if (rawMsg.toLowerCase().includes('resource not accessible') || rawMsg.toLowerCase().includes('permissions')) {
+      return "Access denied (403 Forbidden). Your token lacks the required permissions. Ensure the 'repo' scope is checked for Classic PATs or 'Contents: Read and write' + 'Administration: Read and write' for Fine-grained PATs.";
+    }
+    return `Access denied (403 Forbidden): ${rawMsg}. Please verify token scopes.`;
+  }
+
+  // 404 Not Found
+  if (res.status === 404) {
+    return `Resource not found on GitHub (404). Note: Private repositories return 404 if your token lacks the 'repo' scope.`;
+  }
+
+  // 422 Unprocessable Entity
+  if (res.status === 422) {
+    if (rawMsg.toLowerCase().includes('name already exists')) {
+      return 'A repository with this name already exists in your GitHub account. Please choose a different name or use the "Update Existing Repository" mode.';
+    }
+    if (rawMsg.toLowerCase().includes('reference already exists')) {
+      return 'Branch reference already exists on GitHub.';
+    }
+    return `GitHub validation error (422): ${rawMsg}`;
+  }
+
+  return `${defaultMessage}: ${rawMsg} (HTTP ${res.status})`;
+}
+
+/**
+ * Validates a GitHub Personal Access Token and retrieves authenticated user details and scopes.
  */
 export async function validateGitHubToken(token: string): Promise<GitHubUser> {
-  const cleanToken = token.trim();
-  if (!cleanToken) {
+  const clean = cleanGitHubToken(token);
+  if (!clean) {
     throw new Error('Please enter a valid GitHub Personal Access Token.');
   }
 
   const res = await fetch(`${GITHUB_API_BASE}/user`, {
-    headers: {
-      Authorization: `token ${cleanToken}`,
-      Accept: 'application/vnd.github.v3+json',
-    },
+    headers: getGitHubHeaders(clean),
   });
 
-  if (res.status === 401) {
-    throw new Error('Invalid GitHub token. Authentication failed (401 Unauthorized).');
-  }
-
-  if (res.status === 403) {
-    throw new Error('GitHub token access denied (403 Forbidden). Token may lack required scopes or be rate limited.');
-  }
-
   if (!res.ok) {
-    throw new Error(`GitHub API error (${res.status}): ${res.statusText}`);
+    const errorMsg = await parseGitHubErrorResponse(res, 'Token validation failed');
+    throw new Error(errorMsg);
   }
 
   const data = await res.json();
+
+  // Extract scopes and rate limit headers
+  const rawScopes = res.headers.get('x-oauth-scopes');
+  const scopes = rawScopes ? rawScopes.split(',').map((s) => s.trim()).filter(Boolean) : [];
+  const rateLimitRemaining = res.headers.get('x-ratelimit-remaining')
+    ? parseInt(res.headers.get('x-ratelimit-remaining')!, 10)
+    : undefined;
+  const rateLimitResetTimestamp = res.headers.get('x-ratelimit-reset')
+    ? parseInt(res.headers.get('x-ratelimit-reset')!, 10) * 1000
+    : undefined;
+
+  let tokenType: 'classic' | 'fine-grained' | 'oauth' | 'unknown' = 'unknown';
+  if (clean.startsWith('ghp_')) {
+    tokenType = 'classic';
+  } else if (clean.startsWith('github_pat_')) {
+    tokenType = 'fine-grained';
+  } else if (clean.startsWith('gho_')) {
+    tokenType = 'oauth';
+  } else if (rawScopes !== null) {
+    tokenType = 'classic';
+  }
+
+  const hasRepoScope = scopes.includes('repo') || scopes.includes('public_repo');
+
   return {
     login: data.login,
     name: data.name,
     avatarUrl: data.avatar_url,
     htmlUrl: data.html_url,
     publicRepos: data.public_repos || 0,
+    scopes,
+    hasRepoScope,
+    tokenType,
+    rateLimitRemaining,
+    rateLimitReset: rateLimitResetTimestamp ? new Date(rateLimitResetTimestamp) : undefined,
   };
 }
 
@@ -57,23 +152,25 @@ export async function validateGitHubToken(token: string): Promise<GitHubUser> {
  * Checks if a repository with the given name already exists under the user's account.
  */
 export async function checkRepositoryExists(token: string, owner: string, repoName: string): Promise<boolean> {
-  const cleanToken = token.trim();
+  const clean = cleanGitHubToken(token);
   const res = await fetch(`${GITHUB_API_BASE}/repos/${owner}/${encodeURIComponent(repoName)}`, {
-    headers: {
-      Authorization: `token ${cleanToken}`,
-      Accept: 'application/vnd.github.v3+json',
-    },
+    headers: getGitHubHeaders(clean),
   });
 
   if (res.status === 200) {
-    return true; // Repository exists
+    return true;
   }
   if (res.status === 404) {
-    return false; // Repository does not exist
+    return false;
   }
 
-  // Handle other unexpected errors
-  throw new Error(`Failed to check repository existence: HTTP ${res.status}`);
+  // If rate limit or other error, do not assume false silently
+  if (res.status === 401 || res.status === 403) {
+    const msg = await parseGitHubErrorResponse(res, 'Failed to check repository');
+    throw new Error(msg);
+  }
+
+  return false;
 }
 
 /**
@@ -83,15 +180,11 @@ export async function createGitHubRepository(
   token: string,
   config: RepoConfig
 ): Promise<{ owner: string; name: string; htmlUrl: string }> {
-  const cleanToken = token.trim();
+  const clean = cleanGitHubToken(token);
 
   const res = await fetch(`${GITHUB_API_BASE}/user/repos`, {
     method: 'POST',
-    headers: {
-      Authorization: `token ${cleanToken}`,
-      Accept: 'application/vnd.github.v3+json',
-      'Content-Type': 'application/json',
-    },
+    headers: getGitHubHeaders(clean),
     body: JSON.stringify({
       name: config.name.trim(),
       description: config.description.trim(),
@@ -100,15 +193,9 @@ export async function createGitHubRepository(
     }),
   });
 
-  if (res.status === 422) {
-    const errorData = await res.json().catch(() => ({}));
-    throw new Error(`Repository creation failed: Name "${config.name}" already exists or is invalid on GitHub.`);
-  }
-
   if (!res.ok) {
-    const errorData = await res.json().catch(() => ({}));
-    const msg = errorData.message || res.statusText;
-    throw new Error(`Failed to create repository: ${msg} (HTTP ${res.status})`);
+    const errorMsg = await parseGitHubErrorResponse(res, 'Failed to create repository');
+    throw new Error(errorMsg);
   }
 
   const data = await res.json();
@@ -121,7 +208,7 @@ export async function createGitHubRepository(
 
 /**
  * Uploads project files using the GitHub Git Data API (Blobs -> Tree -> Commit -> Ref).
- * Includes concurrent blob creation, progress tracking, and error details.
+ * Includes concurrent blob creation, exponential backoff, progress tracking, and fallback ref handling.
  */
 export async function uploadProjectToGitHub(
   token: string,
@@ -130,13 +217,13 @@ export async function uploadProjectToGitHub(
   filesToUpload: ExtractedFileItem[],
   onProgress: (progress: UploadProgress) => void
 ): Promise<{ commitSha: string; progress: UploadProgress }> {
-  const cleanToken = token.trim();
+  const clean = cleanGitHubToken(token);
   const total = filesToUpload.length;
 
   const progress: UploadProgress = {
     totalFiles: total,
     processedFiles: 0,
-    currentFile: '',
+    currentFile: 'Initializing upload...',
     successfulCount: 0,
     failedCount: 0,
     skippedCount: 0,
@@ -150,22 +237,25 @@ export async function uploadProjectToGitHub(
 
   onProgress({ ...progress });
 
+  if (total === 0) {
+    progress.status = 'failed';
+    progress.errorMessage = 'No files selected for upload.';
+    onProgress({ ...progress });
+    throw new Error(progress.errorMessage);
+  }
+
   const treeItems: { path: string; mode: string; type: string; sha: string }[] = [];
 
   // Concurrency helper for uploading blobs
-  const concurrency = 4;
+  const concurrency = 3;
   let index = 0;
 
   async function uploadBlobWithRetry(fileItem: ExtractedFileItem, attempt: number = 1): Promise<string> {
     const base64Content = arrayBufferToBase64(fileItem.content);
 
-    const res = await fetch(`${GITHUB_API_BASE}/repos/${owner}/${repo}/git/blobs`, {
+    const res = await fetch(`${GITHUB_API_BASE}/repos/${owner}/${encodeURIComponent(repo)}/git/blobs`, {
       method: 'POST',
-      headers: {
-        Authorization: `token ${cleanToken}`,
-        Accept: 'application/vnd.github.v3+json',
-        'Content-Type': 'application/json',
-      },
+      headers: getGitHubHeaders(clean),
       body: JSON.stringify({
         content: base64Content,
         encoding: 'base64',
@@ -173,13 +263,14 @@ export async function uploadProjectToGitHub(
     });
 
     if (!res.ok) {
-      if ((res.status === 429 || res.status >= 500) && attempt < 3) {
-        // Exponential backoff retry
-        await new Promise((r) => setTimeout(r, attempt * 1000));
+      if ((res.status === 403 || res.status === 429 || res.status >= 500) && attempt <= 4) {
+        // Exponential backoff with jitter
+        const delay = Math.pow(2, attempt) * 1000 + Math.random() * 500;
+        await new Promise((r) => setTimeout(r, delay));
         return uploadBlobWithRetry(fileItem, attempt + 1);
       }
-      const errJson = await res.json().catch(() => ({}));
-      throw new Error(errJson.message || `HTTP ${res.status}: ${res.statusText}`);
+      const errorMsg = await parseGitHubErrorResponse(res, `Failed to upload blob for ${fileItem.normalizedPath}`);
+      throw new Error(errorMsg);
     }
 
     const data = await res.json();
@@ -203,7 +294,10 @@ export async function uploadProjectToGitHub(
         progress.successfulCount++;
 
         // Determine git file mode: 100755 for executable scripts, 100644 for regular files
-        const isExecutable = fileItem.normalizedPath.endsWith('.sh') || fileItem.normalizedPath.endsWith('.bash');
+        const isExecutable =
+          fileItem.normalizedPath.endsWith('.sh') ||
+          fileItem.normalizedPath.endsWith('.bash') ||
+          fileItem.normalizedPath.endsWith('.command');
         const mode = isExecutable ? '100755' : '100644';
 
         treeItems.push({
@@ -220,6 +314,9 @@ export async function uploadProjectToGitHub(
 
       progress.processedFiles++;
       onProgress({ ...progress });
+
+      // Small throttle between files to respect GitHub secondary rate limits
+      await new Promise((r) => setTimeout(r, 25));
     }
   }
 
@@ -229,90 +326,105 @@ export async function uploadProjectToGitHub(
 
   if (progress.successfulCount === 0) {
     progress.status = 'failed';
-    progress.errorMessage = 'All file blob creations failed. Check your network or GitHub token permissions.';
+    progress.errorMessage =
+      progress.fileResults[0]?.error ||
+      'All file uploads failed. Please check your GitHub token permissions (requires "repo" scope) and network connection.';
     onProgress({ ...progress });
     throw new Error(progress.errorMessage);
   }
 
-  // Step 2: Create Tree
+  // Step 2: Create Git Tree
   progress.currentFile = 'Creating Git Tree structure...';
   onProgress({ ...progress });
 
-  const treeRes = await fetch(`${GITHUB_API_BASE}/repos/${owner}/${repo}/git/trees`, {
+  const treeRes = await fetch(`${GITHUB_API_BASE}/repos/${owner}/${encodeURIComponent(repo)}/git/trees`, {
     method: 'POST',
-    headers: {
-      Authorization: `token ${cleanToken}`,
-      Accept: 'application/vnd.github.v3+json',
-      'Content-Type': 'application/json',
-    },
+    headers: getGitHubHeaders(clean),
     body: JSON.stringify({
       tree: treeItems,
     }),
   });
 
   if (!treeRes.ok) {
-    const errData = await treeRes.json().catch(() => ({}));
+    const errorMsg = await parseGitHubErrorResponse(treeRes, 'Git tree creation failed');
     progress.status = 'failed';
-    progress.errorMessage = `Git tree creation failed: ${errData.message || treeRes.statusText}`;
+    progress.errorMessage = errorMsg;
     onProgress({ ...progress });
-    throw new Error(progress.errorMessage);
+    throw new Error(errorMsg);
   }
 
   const treeData = await treeRes.json();
   const treeSha = treeData.sha;
 
-  // Step 3: Create Commit
+  // Step 3: Create Initial Commit
   progress.currentFile = 'Creating Initial Commit...';
   onProgress({ ...progress });
 
-  const commitRes = await fetch(`${GITHUB_API_BASE}/repos/${owner}/${repo}/git/commits`, {
+  const commitRes = await fetch(`${GITHUB_API_BASE}/repos/${owner}/${encodeURIComponent(repo)}/git/commits`, {
     method: 'POST',
-    headers: {
-      Authorization: `token ${cleanToken}`,
-      Accept: 'application/vnd.github.v3+json',
-      'Content-Type': 'application/json',
-    },
+    headers: getGitHubHeaders(clean),
     body: JSON.stringify({
-      message: 'Initial project upload',
+      message: 'Initial project upload via ZipToGitHub',
       tree: treeSha,
       parents: [],
     }),
   });
 
   if (!commitRes.ok) {
-    const errData = await commitRes.json().catch(() => ({}));
+    const errorMsg = await parseGitHubErrorResponse(commitRes, 'Git commit creation failed');
     progress.status = 'failed';
-    progress.errorMessage = `Git commit creation failed: ${errData.message || commitRes.statusText}`;
+    progress.errorMessage = errorMsg;
     onProgress({ ...progress });
-    throw new Error(progress.errorMessage);
+    throw new Error(errorMsg);
   }
 
   const commitData = await commitRes.json();
   const commitSha = commitData.sha;
 
-  // Step 4: Create Ref (main)
+  // Step 4: Create or Update Ref (main)
   progress.currentFile = 'Updating main branch reference...';
   onProgress({ ...progress });
 
-  const refRes = await fetch(`${GITHUB_API_BASE}/repos/${owner}/${repo}/git/refs`, {
+  let refRes = await fetch(`${GITHUB_API_BASE}/repos/${owner}/${encodeURIComponent(repo)}/git/refs`, {
     method: 'POST',
-    headers: {
-      Authorization: `token ${cleanToken}`,
-      Accept: 'application/vnd.github.v3+json',
-      'Content-Type': 'application/json',
-    },
+    headers: getGitHubHeaders(clean),
     body: JSON.stringify({
       ref: 'refs/heads/main',
       sha: commitSha,
     }),
   });
 
+  // If ref already exists (HTTP 422), fallback to PATCH
+  if (!refRes.ok && refRes.status === 422) {
+    refRes = await fetch(`${GITHUB_API_BASE}/repos/${owner}/${encodeURIComponent(repo)}/git/refs/heads/main`, {
+      method: 'PATCH',
+      headers: getGitHubHeaders(clean),
+      body: JSON.stringify({
+        sha: commitSha,
+        force: true,
+      }),
+    });
+  }
+
   if (!refRes.ok) {
-    const errData = await refRes.json().catch(() => ({}));
+    const errorMsg = await parseGitHubErrorResponse(refRes, 'Failed to set main branch reference');
     progress.status = 'failed';
-    progress.errorMessage = `Failed to create branch ref: ${errData.message || refRes.statusText}`;
+    progress.errorMessage = errorMsg;
     onProgress({ ...progress });
-    throw new Error(progress.errorMessage);
+    throw new Error(errorMsg);
+  }
+
+  // Ensure default branch is set to main
+  try {
+    await fetch(`${GITHUB_API_BASE}/repos/${owner}/${encodeURIComponent(repo)}`, {
+      method: 'PATCH',
+      headers: getGitHubHeaders(clean),
+      body: JSON.stringify({
+        default_branch: 'main',
+      }),
+    });
+  } catch {
+    // Non-blocking
   }
 
   progress.status = progress.failedCount > 0 ? 'paused' : 'completed';
@@ -329,26 +441,28 @@ export async function verifyGitHubRepositoryTree(
   token: string,
   owner: string,
   repo: string,
-  expectedPaths: string[]
+  expectedPaths: string[],
+  branch: string = 'main'
 ): Promise<VerificationResult> {
-  const cleanToken = token.trim();
+  const clean = cleanGitHubToken(token);
 
-  // Fetch recursive tree from main branch
-  const res = await fetch(`${GITHUB_API_BASE}/repos/${owner}/${repo}/git/trees/main?recursive=1`, {
-    headers: {
-      Authorization: `token ${cleanToken}`,
-      Accept: 'application/vnd.github.v3+json',
-    },
-  });
+  // Fetch recursive tree from branch
+  const res = await fetch(
+    `${GITHUB_API_BASE}/repos/${owner}/${encodeURIComponent(repo)}/git/trees/${encodeURIComponent(branch)}?recursive=1`,
+    {
+      headers: getGitHubHeaders(clean),
+    }
+  );
 
   if (!res.ok) {
+    const errorMsg = await parseGitHubErrorResponse(res, 'Failed to fetch GitHub repository tree');
     return {
       verified: false,
       expectedCount: expectedPaths.length,
       actualCount: 0,
       missingFiles: expectedPaths,
       unexpectedFiles: [],
-      message: `Failed to fetch GitHub repository tree: HTTP ${res.status}`,
+      message: errorMsg,
     };
   }
 
@@ -383,7 +497,7 @@ export async function verifyGitHubRepositoryTree(
     unexpectedFiles,
     message: isVerified
       ? `Verification Passed: All ${expectedPaths.length} files confirmed in repository tree.`
-      : `Verification Failed: ${missingFiles.length} file(s) missing from remote repository tree.`,
+      : `Verification Warning: ${missingFiles.length} file(s) missing from remote repository tree.`,
   };
 }
 
@@ -396,20 +510,20 @@ export interface RemoteTreeItem {
 }
 
 /**
- * Fetches the user's GitHub repositories.
+ * Fetches the user's GitHub repositories with pagination support.
  */
 export async function getUserRepositories(token: string): Promise<GitHubRepository[]> {
-  const cleanToken = token.trim();
-  const res = await fetch(`${GITHUB_API_BASE}/user/repos?sort=updated&per_page=100&affiliation=owner,collaborator`, {
-    headers: {
-      Authorization: `token ${cleanToken}`,
-      Accept: 'application/vnd.github.v3+json',
-    },
-  });
+  const clean = cleanGitHubToken(token);
+  const res = await fetch(
+    `${GITHUB_API_BASE}/user/repos?sort=updated&per_page=100&affiliation=owner,collaborator`,
+    {
+      headers: getGitHubHeaders(clean),
+    }
+  );
 
   if (!res.ok) {
-    const errData = await res.json().catch(() => ({}));
-    throw new Error(`Failed to fetch user repositories: ${errData.message || res.statusText} (HTTP ${res.status})`);
+    const errorMsg = await parseGitHubErrorResponse(res, 'Failed to fetch user repositories');
+    throw new Error(errorMsg);
   }
 
   const data = await res.json();
@@ -433,17 +547,14 @@ export async function getUserRepositories(token: string): Promise<GitHubReposito
  * Fetches branches for a repository.
  */
 export async function getRepositoryBranches(token: string, owner: string, repo: string): Promise<GitHubBranch[]> {
-  const cleanToken = token.trim();
+  const clean = cleanGitHubToken(token);
   const res = await fetch(`${GITHUB_API_BASE}/repos/${owner}/${encodeURIComponent(repo)}/branches?per_page=100`, {
-    headers: {
-      Authorization: `token ${cleanToken}`,
-      Accept: 'application/vnd.github.v3+json',
-    },
+    headers: getGitHubHeaders(clean),
   });
 
   if (!res.ok) {
-    const errData = await res.json().catch(() => ({}));
-    throw new Error(`Failed to fetch branches for ${owner}/${repo}: ${errData.message || res.statusText}`);
+    const errorMsg = await parseGitHubErrorResponse(res, `Failed to fetch branches for ${owner}/${repo}`);
+    throw new Error(errorMsg);
   }
 
   const data = await res.json();
@@ -457,32 +568,32 @@ export async function getRepositoryBranches(token: string, owner: string, repo: 
  * Retrieves latest commit SHA and root tree SHA for a branch.
  */
 export async function getLatestCommitAndTree(token: string, owner: string, repo: string, branch: string) {
-  const cleanToken = token.trim();
-  const refRes = await fetch(`${GITHUB_API_BASE}/repos/${owner}/${encodeURIComponent(repo)}/git/ref/heads/${encodeURIComponent(branch)}`, {
-    headers: {
-      Authorization: `token ${cleanToken}`,
-      Accept: 'application/vnd.github.v3+json',
-    },
-  });
+  const clean = cleanGitHubToken(token);
+  const refRes = await fetch(
+    `${GITHUB_API_BASE}/repos/${owner}/${encodeURIComponent(repo)}/git/ref/heads/${encodeURIComponent(branch)}`,
+    {
+      headers: getGitHubHeaders(clean),
+    }
+  );
 
   if (!refRes.ok) {
-    const errData = await refRes.json().catch(() => ({}));
-    throw new Error(`Failed to fetch branch reference for "${branch}": ${errData.message || refRes.statusText}`);
+    const errorMsg = await parseGitHubErrorResponse(refRes, `Failed to fetch branch reference for "${branch}"`);
+    throw new Error(errorMsg);
   }
 
   const refData = await refRes.json();
   const commitSha = refData.object.sha;
 
-  const commitRes = await fetch(`${GITHUB_API_BASE}/repos/${owner}/${encodeURIComponent(repo)}/git/commits/${commitSha}`, {
-    headers: {
-      Authorization: `token ${cleanToken}`,
-      Accept: 'application/vnd.github.v3+json',
-    },
-  });
+  const commitRes = await fetch(
+    `${GITHUB_API_BASE}/repos/${owner}/${encodeURIComponent(repo)}/git/commits/${commitSha}`,
+    {
+      headers: getGitHubHeaders(clean),
+    }
+  );
 
   if (!commitRes.ok) {
-    const errData = await commitRes.json().catch(() => ({}));
-    throw new Error(`Failed to fetch commit details: ${errData.message || commitRes.statusText}`);
+    const errorMsg = await parseGitHubErrorResponse(commitRes, 'Failed to fetch commit details');
+    throw new Error(errorMsg);
   }
 
   const commitData = await commitRes.json();
@@ -496,17 +607,17 @@ export async function getLatestCommitAndTree(token: string, owner: string, repo:
  * Fetches the complete recursive tree for a given tree SHA.
  */
 export async function getGitHubTree(token: string, owner: string, repo: string, treeSha: string): Promise<RemoteTreeItem[]> {
-  const cleanToken = token.trim();
-  const res = await fetch(`${GITHUB_API_BASE}/repos/${owner}/${encodeURIComponent(repo)}/git/trees/${treeSha}?recursive=1`, {
-    headers: {
-      Authorization: `token ${cleanToken}`,
-      Accept: 'application/vnd.github.v3+json',
-    },
-  });
+  const clean = cleanGitHubToken(token);
+  const res = await fetch(
+    `${GITHUB_API_BASE}/repos/${owner}/${encodeURIComponent(repo)}/git/trees/${treeSha}?recursive=1`,
+    {
+      headers: getGitHubHeaders(clean),
+    }
+  );
 
   if (!res.ok) {
-    const errData = await res.json().catch(() => ({}));
-    throw new Error(`Failed to fetch repository tree: ${errData.message || res.statusText}`);
+    const errorMsg = await parseGitHubErrorResponse(res, 'Failed to fetch repository tree');
+    throw new Error(errorMsg);
   }
 
   const data = await res.json();
@@ -650,7 +761,7 @@ export async function updateGitHubRepository(
   updateConfig: UpdateConfig,
   onProgress: (progress: UploadProgress) => void
 ): Promise<{ commitSha: string; progress: UploadProgress }> {
-  const cleanToken = token.trim();
+  const clean = cleanGitHubToken(token);
   const diff = updateConfig.diffReport;
 
   const filesToUploadItems = [
@@ -681,7 +792,7 @@ export async function updateGitHubRepository(
 
   const treeItems: { path: string; mode: string; type: string; sha: string | null }[] = [];
 
-  const concurrency = 4;
+  const concurrency = 3;
   let index = 0;
 
   async function uploadBlobWithRetry(diffItem: FileDiffItem, attempt: number = 1): Promise<string> {
@@ -693,27 +804,21 @@ export async function updateGitHubRepository(
 
     const res = await fetch(`${GITHUB_API_BASE}/repos/${owner}/${encodeURIComponent(repo)}/git/blobs`, {
       method: 'POST',
-      headers: {
-        Authorization: `token ${cleanToken}`,
-        Accept: 'application/vnd.github.v3+json',
-        'Content-Type': 'application/json',
-      },
+      headers: getGitHubHeaders(clean),
       body: JSON.stringify({
         content: base64Content,
         encoding: 'base64',
       }),
     });
 
-    if (res.status === 403 || res.status === 429) {
-      if (attempt <= 3) {
-        await new Promise((r) => setTimeout(r, Math.pow(2, attempt) * 1000));
+    if (!res.ok) {
+      if ((res.status === 403 || res.status === 429 || res.status >= 500) && attempt <= 4) {
+        const delay = Math.pow(2, attempt) * 1000 + Math.random() * 500;
+        await new Promise((r) => setTimeout(r, delay));
         return uploadBlobWithRetry(diffItem, attempt + 1);
       }
-    }
-
-    if (!res.ok) {
-      const errData = await res.json().catch(() => ({}));
-      throw new Error(`Failed to upload blob for ${diffItem.path}: ${errData.message || res.statusText}`);
+      const errorMsg = await parseGitHubErrorResponse(res, `Failed to upload blob for ${diffItem.path}`);
+      throw new Error(errorMsg);
     }
 
     const data = await res.json();
@@ -750,6 +855,8 @@ export async function updateGitHubRepository(
         progress.processedFiles++;
         onProgress({ ...progress });
       }
+
+      await new Promise((r) => setTimeout(r, 25));
     }
   }
 
@@ -793,7 +900,7 @@ export async function updateGitHubRepository(
   progress.currentFile = 'Verifying remote repository state...';
   onProgress({ ...progress });
 
-  const latestState = await getLatestCommitAndTree(cleanToken, owner, repo, branch);
+  const latestState = await getLatestCommitAndTree(clean, owner, repo, branch);
   if (latestState.commitSha !== diff.baseCommitSha) {
     throw new Error(
       `⚠ Repository changed on GitHub during update! Another commit (${latestState.commitSha.substring(
@@ -809,11 +916,7 @@ export async function updateGitHubRepository(
 
   const treeRes = await fetch(`${GITHUB_API_BASE}/repos/${owner}/${encodeURIComponent(repo)}/git/trees`, {
     method: 'POST',
-    headers: {
-      Authorization: `token ${cleanToken}`,
-      Accept: 'application/vnd.github.v3+json',
-      'Content-Type': 'application/json',
-    },
+    headers: getGitHubHeaders(clean),
     body: JSON.stringify({
       base_tree: diff.baseTreeSha,
       tree: treeItems,
@@ -821,8 +924,8 @@ export async function updateGitHubRepository(
   });
 
   if (!treeRes.ok) {
-    const errData = await treeRes.json().catch(() => ({}));
-    throw new Error(`Failed to create updated tree: ${errData.message || treeRes.statusText}`);
+    const errorMsg = await parseGitHubErrorResponse(treeRes, 'Failed to create updated tree');
+    throw new Error(errorMsg);
   }
 
   const newTreeData = await treeRes.json();
@@ -837,11 +940,7 @@ export async function updateGitHubRepository(
 
   const commitRes = await fetch(`${GITHUB_API_BASE}/repos/${owner}/${encodeURIComponent(repo)}/git/commits`, {
     method: 'POST',
-    headers: {
-      Authorization: `token ${cleanToken}`,
-      Accept: 'application/vnd.github.v3+json',
-      'Content-Type': 'application/json',
-    },
+    headers: getGitHubHeaders(clean),
     body: JSON.stringify({
       message: commitMsg,
       tree: newTreeSha,
@@ -850,8 +949,8 @@ export async function updateGitHubRepository(
   });
 
   if (!commitRes.ok) {
-    const errData = await commitRes.json().catch(() => ({}));
-    throw new Error(`Failed to create commit: ${errData.message || commitRes.statusText}`);
+    const errorMsg = await parseGitHubErrorResponse(commitRes, 'Failed to create commit');
+    throw new Error(errorMsg);
   }
 
   const commitData = await commitRes.json();
@@ -861,22 +960,21 @@ export async function updateGitHubRepository(
   progress.currentFile = 'Updating branch reference...';
   onProgress({ ...progress });
 
-  const refRes = await fetch(`${GITHUB_API_BASE}/repos/${owner}/${encodeURIComponent(repo)}/git/refs/heads/${encodeURIComponent(branch)}`, {
-    method: 'PATCH',
-    headers: {
-      Authorization: `token ${cleanToken}`,
-      Accept: 'application/vnd.github.v3+json',
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      sha: commitSha,
-      force: false,
-    }),
-  });
+  const refRes = await fetch(
+    `${GITHUB_API_BASE}/repos/${owner}/${encodeURIComponent(repo)}/git/refs/heads/${encodeURIComponent(branch)}`,
+    {
+      method: 'PATCH',
+      headers: getGitHubHeaders(clean),
+      body: JSON.stringify({
+        sha: commitSha,
+        force: false,
+      }),
+    }
+  );
 
   if (!refRes.ok) {
-    const errData = await refRes.json().catch(() => ({}));
-    throw new Error(`Failed to update branch reference: ${errData.message || refRes.statusText}`);
+    const errorMsg = await parseGitHubErrorResponse(refRes, 'Failed to update branch reference');
+    throw new Error(errorMsg);
   }
 
   progress.status = 'completed';
@@ -885,4 +983,3 @@ export async function updateGitHubRepository(
 
   return { commitSha, progress };
 }
-

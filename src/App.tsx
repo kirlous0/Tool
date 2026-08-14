@@ -27,6 +27,7 @@ import {
   uploadProjectToGitHub,
   updateGitHubRepository,
   verifyGitHubRepositoryTree,
+  checkRepositoryExists,
 } from './utils/githubApi';
 
 export default function App() {
@@ -220,25 +221,37 @@ export default function App() {
     });
 
     try {
-      // 1. Create Repository
-      const repo = await createGitHubRepository(token, config);
-      setCreatedRepoUrl(repo.htmlUrl);
+      // 1. Create Repository (or use existing if created in a previous attempt)
+      let repoOwner = user.login;
+      let repoName = config.name.trim();
+      let htmlUrl = `https://github.com/${user.login}/${config.name.trim()}`;
+
+      const alreadyExists = await checkRepositoryExists(token, user.login, config.name.trim()).catch(() => false);
+      if (!alreadyExists) {
+        const repo = await createGitHubRepository(token, config);
+        repoOwner = repo.owner;
+        repoName = repo.name;
+        htmlUrl = repo.htmlUrl;
+      }
+      setCreatedRepoUrl(htmlUrl);
 
       // 2. Upload Files via Git Data API
-      await uploadProjectToGitHub(
+      const uploadRes = await uploadProjectToGitHub(
         token,
-        repo.owner,
-        repo.name,
+        repoOwner,
+        repoName,
         activeFiles,
         (progress) => setUploadProgress({ ...progress })
       );
+
+      setCommitSha(uploadRes.commitSha);
 
       // 3. Mandatory Verification
       const activePaths = activeFiles.map((f) => f.normalizedPath);
       const verifyRes = await verifyGitHubRepositoryTree(
         token,
-        repo.owner,
-        repo.name,
+        repoOwner,
+        repoName,
         activePaths
       );
 
@@ -380,6 +393,7 @@ export default function App() {
             progress={uploadProgress}
             onRetryFailed={handleRetryFailed}
             onProceedToVerification={() => setStep('completed')}
+            onBackToConfig={() => setStep(appMode === 'create' ? 'github-config' : 'diff-review')}
           />
         )}
 

@@ -1,7 +1,21 @@
 import React, { useState, useEffect } from 'react';
 import { GitHubUser, RepoConfig } from '../types';
 import { validateGitHubToken, checkRepositoryExists } from '../utils/githubApi';
-import { Key, Eye, EyeOff, Github, AlertCircle, CheckCircle2, Loader2, Lock, Globe, ArrowRight } from 'lucide-react';
+import {
+  Key,
+  Eye,
+  EyeOff,
+  Github,
+  AlertCircle,
+  CheckCircle2,
+  Loader2,
+  Lock,
+  Globe,
+  ArrowRight,
+  ShieldAlert,
+  ExternalLink,
+} from 'lucide-react';
+import { TroubleshootingGuide } from './TroubleshootingGuide';
 
 interface GitHubConfigStepProps {
   initialRepoName: string;
@@ -102,9 +116,14 @@ export const GitHubConfigStep: React.FC<GitHubConfigStepProps> = ({
     });
   };
 
+  const hasScopeWarning =
+    user?.scopes !== undefined &&
+    user.scopes.length > 0 &&
+    !user.hasRepoScope;
+
   return (
-    <div className="max-w-3xl mx-auto py-8 px-4">
-      <div className="mb-6 text-center">
+    <div className="max-w-3xl mx-auto py-8 px-4 space-y-6">
+      <div className="text-center">
         <h2 className="text-2xl font-extrabold text-white flex items-center justify-center gap-2">
           <Github className="w-7 h-7 text-cyan-400" />
           GitHub Repository Setup
@@ -128,12 +147,12 @@ export const GitHubConfigStep: React.FC<GitHubConfigStepProps> = ({
               rel="noopener noreferrer"
               className="text-xs text-cyan-400 hover:underline flex items-center gap-1"
             >
-              Generate new token (needs 'repo' scope) ↗
+              Generate token with 'repo' scope ↗
             </a>
           </div>
 
           <p className="text-xs text-slate-400 mb-4">
-            The token is used strictly in memory for this session to create the repository and upload your files. Never stored or logged.
+            The token is used strictly in-memory during this session to create the repository and upload files. It is never stored or transmitted anywhere else.
           </p>
 
           <div className="flex gap-2">
@@ -185,9 +204,33 @@ export const GitHubConfigStep: React.FC<GitHubConfigStepProps> = ({
             </div>
           )}
 
+          {/* Scope Warning Banner if token lacks repo scope */}
+          {hasScopeWarning && (
+            <div className="mt-3 p-3.5 rounded-xl bg-amber-950/40 border border-amber-800 text-amber-200 text-xs flex items-start justify-between gap-3">
+              <div className="flex items-start gap-2.5">
+                <ShieldAlert className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                <div>
+                  <span className="font-bold block mb-0.5">Missing Required 'repo' Scope!</span>
+                  <span className="text-amber-300/90 text-[11px] leading-relaxed">
+                    This token does not have full repository write access. GitHub will reject creating repositories or uploading files without the <strong>repo</strong> scope.
+                  </span>
+                </div>
+              </div>
+              <a
+                href="https://github.com/settings/tokens/new?scopes=repo&description=ZipToGitHub"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="px-3 py-1.5 rounded-lg bg-amber-600 hover:bg-amber-500 text-white text-[11px] font-semibold transition shrink-0 flex items-center gap-1"
+              >
+                <span>Fix Scope</span>
+                <ExternalLink className="w-3 h-3" />
+              </a>
+            </div>
+          )}
+
           {/* User Account Card */}
           {user && (
-            <div className="mt-4 p-3.5 rounded-xl bg-cyan-950/30 border border-cyan-800/80 flex items-center justify-between">
+            <div className="mt-4 p-3.5 rounded-xl bg-cyan-950/30 border border-cyan-800/80 flex items-center justify-between flex-wrap gap-2">
               <div className="flex items-center gap-3">
                 <img
                   src={user.avatarUrl}
@@ -199,12 +242,26 @@ export const GitHubConfigStep: React.FC<GitHubConfigStepProps> = ({
                     {user.name || user.login}
                     <span className="text-xs font-mono font-normal text-cyan-400">@{user.login}</span>
                   </div>
-                  <div className="text-[11px] text-slate-400">Authenticated GitHub User</div>
+                  <div className="text-[11px] text-slate-400 flex items-center gap-2">
+                    <span>Type: {user.tokenType === 'classic' ? 'Classic PAT' : 'Fine-Grained PAT'}</span>
+                    {user.scopes && user.scopes.length > 0 && (
+                      <span className="font-mono text-[10px] text-slate-500 truncate max-w-xs">
+                        [{user.scopes.join(', ')}]
+                      </span>
+                    )}
+                  </div>
                 </div>
               </div>
 
-              <span className="px-2.5 py-1 rounded-full bg-emerald-950 text-emerald-400 border border-emerald-800 text-xs font-medium flex items-center gap-1">
-                <CheckCircle2 className="w-3.5 h-3.5" /> Token Active
+              <span
+                className={`px-2.5 py-1 rounded-full text-xs font-medium flex items-center gap-1 ${
+                  hasScopeWarning
+                    ? 'bg-amber-950 text-amber-400 border border-amber-800'
+                    : 'bg-emerald-950 text-emerald-400 border border-emerald-800'
+                }`}
+              >
+                <CheckCircle2 className="w-3.5 h-3.5" />
+                {hasScopeWarning ? 'Scopes Restricted' : 'Token Ready'}
               </span>
             </div>
           )}
@@ -332,6 +389,9 @@ export const GitHubConfigStep: React.FC<GitHubConfigStepProps> = ({
           </button>
         </div>
       </form>
+
+      {/* Embedded Troubleshooting & Permissions Guide */}
+      <TroubleshootingGuide hasTokenScopeWarning={hasScopeWarning} />
     </div>
   );
 };

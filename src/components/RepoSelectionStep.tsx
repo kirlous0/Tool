@@ -24,6 +24,7 @@ import {
   validateGitHubToken,
 } from '../utils/githubApi';
 import { ExtractedFileItem, DiffReport } from '../types';
+import { TroubleshootingGuide } from './TroubleshootingGuide';
 
 interface RepoSelectionStepProps {
   token: string;
@@ -464,6 +465,9 @@ export const RepoSelectionStep: React.FC<RepoSelectionStepProps> = ({
           </div>
         </div>
       )}
+
+      {/* Troubleshooting Guide */}
+      <TroubleshootingGuide />
     </div>
   );
 };
