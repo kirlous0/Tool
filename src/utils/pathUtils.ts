@@ -110,17 +110,42 @@ export function isBinaryFile(fileName: string, buffer: ArrayBuffer): boolean {
 }
 
 /**
- * Converts an ArrayBuffer to a Base64 string safely without stack overflow.
+ * Converts an ArrayBuffer to a Base64 string safely without stack overflow or encoding issues.
  */
-export function arrayBufferToBase64(buffer: ArrayBuffer): string {
-  let binary = '';
+export async function arrayBufferToBase64(buffer: ArrayBuffer): Promise<string> {
+  if (!buffer || buffer.byteLength === 0) {
+    return '';
+  }
+
+  // 1. Native browser FileReader (fastest and most robust for any binary/text content)
+  if (typeof FileReader !== 'undefined' && typeof Blob !== 'undefined') {
+    try {
+      return await new Promise<string>((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const res = reader.result as string;
+          const commaIdx = res.indexOf(',');
+          resolve(commaIdx !== -1 ? res.substring(commaIdx + 1) : res);
+        };
+        reader.onerror = () => reject(reader.error);
+        reader.readAsDataURL(new Blob([buffer]));
+      });
+    } catch {
+      // Fall through to synchronous chunked conversion
+    }
+  }
+
+  // 2. Safe chunked ArrayBuffer to base64 conversion
   const bytes = new Uint8Array(buffer);
+  let binary = '';
+  const chunkSize = 8192;
   const len = bytes.byteLength;
-  const chunkSize = 0x8000; // 32KB chunks to prevent RangeError: Maximum call stack size exceeded
 
   for (let i = 0; i < len; i += chunkSize) {
     const chunk = bytes.subarray(i, Math.min(i + chunkSize, len));
-    binary += String.fromCharCode.apply(null, Array.from(chunk));
+    for (let j = 0; j < chunk.length; j++) {
+      binary += String.fromCharCode(chunk[j]);
+    }
   }
 
   return btoa(binary);

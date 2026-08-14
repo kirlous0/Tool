@@ -265,6 +265,19 @@ export const GitHubConfigStep: React.FC<GitHubConfigStepProps> = ({
               </span>
             </div>
           )}
+
+          {/* Fine-Grained Token Requirements Banner */}
+          {user && user.tokenType === 'fine-grained' && (
+            <div className="mt-3 p-3.5 rounded-xl bg-slate-950 border border-slate-800 text-xs text-slate-300 flex items-start gap-2.5">
+              <Key className="w-4 h-4 text-cyan-400 shrink-0 mt-0.5" />
+              <div>
+                <span className="font-bold text-white block mb-0.5">Fine-Grained Token Note:</span>
+                <p className="text-slate-400 text-[11px] leading-relaxed">
+                  Make sure your token was created with <strong>Repository access: All repositories</strong> and <strong>Permissions → Contents: Read and write</strong> so GitHub permits creating repositories and committing files.
+                </p>
+              </div>
+            </div>
+          )}
         </div>
 
         {/* Repo Settings Card (Shown when user authenticated) */}

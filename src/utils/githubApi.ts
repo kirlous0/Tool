@@ -55,7 +55,7 @@ export async function parseGitHubErrorResponse(res: Response, defaultMessage: st
 
   // 401 Unauthorized
   if (res.status === 401) {
-    return 'Invalid or expired GitHub token. Authentication failed (401 Unauthorized). Please check your token.';
+    return 'Invalid or expired GitHub Personal Access Token (401 Unauthorized). Please generate a new token with "repo" scope.';
   }
 
   // 403 Forbidden
@@ -67,14 +67,14 @@ export async function parseGitHubErrorResponse(res: Response, defaultMessage: st
       return 'GitHub secondary rate limit reached due to rapid requests. The app will automatically retry with backoff.';
     }
     if (rawMsg.toLowerCase().includes('resource not accessible') || rawMsg.toLowerCase().includes('permissions')) {
-      return "Access denied (403 Forbidden). Your token lacks the required permissions. Ensure the 'repo' scope is checked for Classic PATs or 'Contents: Read and write' + 'Administration: Read and write' for Fine-grained PATs.";
+      return "Access denied (403 Forbidden). Your token lacks the required permissions:\n• For Classic Token (ghp_...): Ensure 'repo' scope is enabled.\n• For Fine-Grained Token (github_pat_...): Ensure 'Repository access' is set to 'All repositories' and 'Permissions -> Contents' is set to 'Read and write'.";
     }
-    return `Access denied (403 Forbidden): ${rawMsg}. Please verify token scopes.`;
+    return `Access denied (403 Forbidden): ${rawMsg}. Please verify token permissions and repository access.`;
   }
 
   // 404 Not Found
   if (res.status === 404) {
-    return `Resource not found on GitHub (404). Note: Private repositories return 404 if your token lacks the 'repo' scope.`;
+    return `Resource not found on GitHub (404). Note: Private repositories and new Git endpoints return 404 if your token lacks the 'repo' scope, or if the repository is still provisioning.`;
   }
 
   // 422 Unprocessable Entity
@@ -199,10 +199,17 @@ export async function createGitHubRepository(
   }
 
   const data = await res.json();
+  const owner = data.owner.login;
+  const name = data.name;
+  const htmlUrl = data.html_url;
+
+  // Give GitHub git storage backend a short moment to initialize the empty repository
+  await new Promise((resolve) => setTimeout(resolve, 800));
+
   return {
-    owner: data.owner.login,
-    name: data.name,
-    htmlUrl: data.html_url,
+    owner,
+    name,
+    htmlUrl,
   };
 }
 
@@ -251,7 +258,7 @@ export async function uploadProjectToGitHub(
   let index = 0;
 
   async function uploadBlobWithRetry(fileItem: ExtractedFileItem, attempt: number = 1): Promise<string> {
-    const base64Content = arrayBufferToBase64(fileItem.content);
+    const base64Content = await arrayBufferToBase64(fileItem.content);
 
     const res = await fetch(`${GITHUB_API_BASE}/repos/${owner}/${encodeURIComponent(repo)}/git/blobs`, {
       method: 'POST',
@@ -263,13 +270,13 @@ export async function uploadProjectToGitHub(
     });
 
     if (!res.ok) {
-      if ((res.status === 403 || res.status === 429 || res.status >= 500) && attempt <= 4) {
-        // Exponential backoff with jitter
-        const delay = Math.pow(2, attempt) * 1000 + Math.random() * 500;
+      // Retry transient errors (404 for newly created repo replication, 409 for lock/empty init, 403/429 rate limit, 5xx)
+      if ((res.status === 404 || res.status === 409 || res.status === 403 || res.status === 429 || res.status >= 500) && attempt <= 5) {
+        const delay = Math.min(1000 * Math.pow(1.5, attempt) + Math.random() * 500, 5000);
         await new Promise((r) => setTimeout(r, delay));
         return uploadBlobWithRetry(fileItem, attempt + 1);
       }
-      const errorMsg = await parseGitHubErrorResponse(res, `Failed to upload blob for ${fileItem.normalizedPath}`);
+      const errorMsg = await parseGitHubErrorResponse(res, `Failed to upload blob for "${fileItem.normalizedPath}"`);
       throw new Error(errorMsg);
     }
 
@@ -326,8 +333,9 @@ export async function uploadProjectToGitHub(
 
   if (progress.successfulCount === 0) {
     progress.status = 'failed';
+    const firstError = progress.fileResults.find((f) => f.error)?.error;
     progress.errorMessage =
-      progress.fileResults[0]?.error ||
+      firstError ||
       'All file uploads failed. Please check your GitHub token permissions (requires "repo" scope) and network connection.';
     onProgress({ ...progress });
     throw new Error(progress.errorMessage);
@@ -800,7 +808,7 @@ export async function updateGitHubRepository(
       throw new Error(`Missing content for local file: ${diffItem.path}`);
     }
 
-    const base64Content = arrayBufferToBase64(diffItem.localFile.content);
+    const base64Content = await arrayBufferToBase64(diffItem.localFile.content);
 
     const res = await fetch(`${GITHUB_API_BASE}/repos/${owner}/${encodeURIComponent(repo)}/git/blobs`, {
       method: 'POST',
@@ -812,12 +820,12 @@ export async function updateGitHubRepository(
     });
 
     if (!res.ok) {
-      if ((res.status === 403 || res.status === 429 || res.status >= 500) && attempt <= 4) {
-        const delay = Math.pow(2, attempt) * 1000 + Math.random() * 500;
+      if ((res.status === 404 || res.status === 409 || res.status === 403 || res.status === 429 || res.status >= 500) && attempt <= 5) {
+        const delay = Math.min(1000 * Math.pow(1.5, attempt) + Math.random() * 500, 5000);
         await new Promise((r) => setTimeout(r, delay));
         return uploadBlobWithRetry(diffItem, attempt + 1);
       }
-      const errorMsg = await parseGitHubErrorResponse(res, `Failed to upload blob for ${diffItem.path}`);
+      const errorMsg = await parseGitHubErrorResponse(res, `Failed to upload blob for "${diffItem.path}"`);
       throw new Error(errorMsg);
     }
 
